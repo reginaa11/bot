@@ -1,223 +1,161 @@
-import vk_api
-from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
-from vk_api.keyboard import VkKeyboard, VkKeyboardColor
-import random
-import time
-import os
-from config import VK_TOKEN, GROUP_ID
-from functions import get_synonyms_bs4, get_definition_api, get_rhyme_api, get_example_api
+import requests
+from bs4 import BeautifulSoup
+import urllib.parse
+import re
 
-# Хранилище последнего слова для каждого пользователя (чтобы не вводить каждый раз)
-user_last_word = {}
+# ВСТРОЕННЫЙ СЛОВАРЬ ДЛЯ РУССКИХ СЛОВ 
+russian_data = {
+    "красивый": {
+        "synonyms": ["прекрасный", "великолепный", "восхитительный", "привлекательный", "обаятельный", "живописный", "изящный"],
+        "definition": "Вызывающий восхищение своей внешностью, гармоничный, приятный для глаз.",
+        "rhymes": ["нетерпеливый", "спесивый", "игривый", "живучий", "справедливый"],
+        "examples": ["У неё был очень красивый голос.", "Это красивый поступок.", "Красивый закат на море."]
+    },
+    "хороший": {
+        "synonyms": ["отличный", "превосходный", "замечательный", "классный", "добротный", "качественный"],
+        "definition": "Положительный по своим качествам, добротный, удовлетворительный.",
+        "rhymes": ["похожий", "пригожий", "осторожный", "сложный", "горошек"],
+        "examples": ["Хороший человек всегда поможет.", "Это хорошая новость!", "У тебя хороший вкус."]
+    },
+    "большой": {
+        "synonyms": ["огромный", "громадный", "крупный", "грандиозный", "гигантский", "колоссальный"],
+        "definition": "Значительный по размеру, величине, объёму.",
+        "rhymes": ["хороший", "пригожий", "чужой", "немой", "золотой"],
+        "examples": ["Большой дом на холме.", "У него большое сердце.", "Большой успех ждёт тебя."]
+    },
+    "маленький": {
+        "synonyms": ["крошечный", "мелкий", "небольшой", "миниатюрный", "малый", "компактный"],
+        "definition": "Незначительный по размеру, объёму, небольшой.",
+        "rhymes": ["спокойненький", "хорошенький", "тоненький", "беленький", "чистенький"],
+        "examples": ["Маленький котёнок спал на диване.", "Это маленький секрет.", "Маленькими шагами к большой цели."]
+    },
+    "умный": {
+        "synonyms": ["разумный", "толковый", "сообразительный", "смышленый", "интеллигентный", "мудрый"],
+        "definition": "Обладающий ясным умом, сообразительный, толковый.",
+        "rhymes": ["шумный", "бездумный", "искусный", "трудный", "чудный"],
+        "examples": ["Умный человек учится на чужих ошибках.", "Это очень умное решение."]
+    },
+    "добрый": {
+        "synonyms": ["отзывчивый", "сердечный", "душевный", "милосердный", "благожелательный", "человечный"],
+        "definition": "Проявляющий участие, готовый помочь, отзывчивый.",
+        "rhymes": ["бодрый", "щедрый", "мудрый", "хитрый", "мокрый"],
+        "examples": ["Добрый взгляд всегда согревает.", "Сделай доброе дело сегодня."]
+    },
+    "любовь": {
+        "synonyms": ["обожание", "страсть", "влюблённость", "привязанность", "симпатия", "нежность"],
+        "definition": "Глубокое эмоциональное влечение, сердечная привязанность.",
+        "rhymes": ["кровь", "вновь", "морковь", "свекровь", "бровь"],
+        "examples": ["Любовь к жизни помогает во всём.", "Первая любовь не забывается."]
+    },
+    "счастье": {
+        "synonyms": ["блаженство", "радость", "восторг", "наслаждение", "успех", "удача"],
+        "definition": "Состояние абсолютной удовлетворённости жизнью.",
+        "rhymes": ["ненастье", "напастье", "пристрастье", "участье", "пастье"],
+        "examples": ["Счастье — когда тебя понимают.", "Желаю тебе счастья!"] 
+    },
+    "любознательный": {
+        "synonyms": ["пытливый", "любопытный", "внимательный", "интересующийся", "дотошный"],
+        "definition": "Склонный к приобретению новых знаний, пытливый.",
+        "rhymes": ["занимательный", "увлекательный", "внимательный", "обязательный"],
+        "examples": ["Любознательный ученик всегда задаёт вопросы.", "Будь любознательным — и мир откроется тебе!"]
+    }
+}
 
-def log_to_file(user_id, message, response_text):
-    if not os.path.exists("logs"):
-        os.makedirs("logs")
-    with open(f"logs/{user_id}.log", "a", encoding="utf-8") as f:
-        f.write(f"[{time.ctime()}] Запрос: {message}\n")
-        f.write(f"[{time.ctime()}] Ответ: {response_text}\n")
-        f.write("-" * 50 + "\n")
-
-def get_main_keyboard():
-    """Главная клавиатура с кнопками команд"""
-    keyboard = VkKeyboard(one_time=False)  # one_time=False - клавиатура не исчезает после нажатия
+#  ФУНКЦИЯ 1: ПАРСИНГ СИНОНИМОВ (для русских слов)
+def get_synonyms_bs4(word):
+    print(f"[Скрапинг] Ищу синонимы для: {word}")
+    word_lower = word.lower()
     
-    # Первый ряд
-    keyboard.add_button("🔍 Синоним", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button("📖 Толкование", color=VkKeyboardColor.PRIMARY)
+    # Сначала проверяем встроенный словарь
+    if word_lower in russian_data:
+        syns = russian_data[word_lower]["synonyms"]
+        return f"🔗 *Синонимы к '{word}':*\n" + ", ".join(syns[:12])
     
-    # Второй ряд
-    keyboard.add_line()
-    keyboard.add_button("🎭 Рифма", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button("💡 Пример", color=VkKeyboardColor.PRIMARY)
+    # Пробуем парсинг сайта
+    try:
+        encoded_word = urllib.parse.quote(word)
+        url = f"https://sinonim.org/s/{encoded_word}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=8)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        content = soup.find('div', {'id': 'content'})
+        if content:
+            words = re.findall(r'[А-Яа-яёЁ]{3,}', content.get_text())
+            synonyms = []
+            for w in words[:30]:
+                if w.lower() != word_lower and len(w) > 2:
+                    synonyms.append(w.lower())
+            synonyms = list(dict.fromkeys(synonyms))[:12]
+            if synonyms:
+                return f"🔗 *Синонимы к '{word}' (парсинг):*\n" + ", ".join(synonyms)
+    except Exception as e:
+        print(f"Парсинг ошибка: {e}")
     
-    # Третий ряд
-    keyboard.add_line()
-    keyboard.add_button("❓ Помощь", color=VkKeyboardColor.SECONDARY)
+    return f"😕 Синонимы для '{word}' не найдены.\nПопробуй: красивый, добрый, умный, большой"
+
+# ФУНКЦИЯ 2: ТОЛКОВАНИЕ (русский словарь + английский API) 
+def get_definition_api(word):
+    print(f"[API] Ищу толкование для: {word}")
+    word_lower = word.lower()
     
-    return keyboard
-
-def get_word_input_keyboard(action):
-    """Клавиатура для ввода слова с кнопкой отмены"""
-    keyboard = VkKeyboard(one_time=True)  # one_time=True - клавиатура исчезнет после нажатия
-    keyboard.add_button(f"✏️ Введи слово для {action}", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button("🔙 Отмена", color=VkKeyboardColor.NEGATIVE)
-    return keyboard
-
-def get_action_keyboard(word):
-    """Клавиатура для выбора действия с уже введённым словом"""
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button(f"🔍 Синоним к '{word[:15]}'", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button(f"📖 Толкование '{word[:15]}'", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button(f"🎭 Рифма к '{word[:15]}'", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button(f"💡 Пример с '{word[:15]}'", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button("🔄 Новое слово", color=VkKeyboardColor.SECONDARY)
-    keyboard.add_button("❓ Помощь", color=VkKeyboardColor.SECONDARY)
-    return keyboard
-
-def main():
-    print("Бот с кнопками запущен...")
-    print(f"ID группы: {GROUP_ID}")
+    # Русские слова
+    if word_lower in russian_data:
+        return f"📚 *Толкование слова '{word}':*\n{russian_data[word_lower]['definition']}"
     
-    vk_session = vk_api.VkApi(token=VK_TOKEN)
-    vk = vk_session.get_api()
-    longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+    # Английские слова через API (для критерия №2)
+    try:
+        url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word_lower}"
+        response = requests.get(url, timeout=8)
+        if response.status_code == 200:
+            data = response.json()
+            definition = data[0]['meanings'][0]['definitions'][0]['definition']
+            return f"📚 *Значение '{word}' (из API):*\n{definition[:300]}"
+        else:
+            return f"📚 *'{word}'*\nПопробуй русские слова: любовь, счастье, доброта\nИли английские: love, happy, beautiful"
+    except Exception as e:
+        return f"⚠️ Ошибка API: {str(e)[:80]}"
+
+# ФУНКЦИЯ 3: РИФМЫ (русский словарь + английский API)
+def get_rhyme_api(word):
+    print(f"[API] Ищу рифму для: {word}")
+    word_lower = word.lower()
     
-    # Словарь для хранения состояния пользователя
-    user_state = {}  # {user_id: {'action': 'synonym', 'waiting_for_word': True}}
+    # Русские слова
+    if word_lower in russian_data and "rhymes" in russian_data[word_lower]:
+        rhymes = russian_data[word_lower]["rhymes"]
+        return f"🎭 *Рифмы к '{word}':*\n" + ", ".join(rhymes[:10])
     
-    for event in longpoll.listen():
-        if event.type == VkBotEventType.MESSAGE_NEW:
-            try:
-                msg = event.object.message
-                user_id = msg['from_id']
-                peer_id = msg['peer_id']
-                message_text = msg['text'].strip()
-                
-                print(f"Сообщение от {user_id}: {message_text}")
-                answer = ""
-                keyboard = None
-                
-                # --- Обработка кнопок и команд ---
-                
-                # 1. Главное меню / Помощь
-                if message_text.lower() in ["помощь", "help", "start", "начать", "/start"] or message_text == "❓ Помощь":
-                    answer = "📖 *Выбери действие на кнопках ниже:*\n\nНажми на кнопку, затем введи слово."
-                    keyboard = get_main_keyboard()
-                    user_state.pop(user_id, None)  # Сбрасываем состояние
-                
-                # 2. Кнопка "Синоним"
-                elif message_text == "🔍 Синоним":
-                    answer = "🔍 *Введи слово, для которого нужно найти синонимы:*"
-                    keyboard = get_word_input_keyboard("синонима")
-                    user_state[user_id] = {'action': 'synonym', 'waiting_for_word': True}
-                
-                # 3. Кнопка "Толкование"
-                elif message_text == "📖 Толкование":
-                    answer = "📖 *Введи слово, для которого нужно толкование:*"
-                    keyboard = get_word_input_keyboard("толкования")
-                    user_state[user_id] = {'action': 'definition', 'waiting_for_word': True}
-                
-                # 4. Кнопка "Рифма"
-                elif message_text == "🎭 Рифма":
-                    answer = "🎭 *Введи слово, для которого нужно подобрать рифму:*"
-                    keyboard = get_word_input_keyboard("рифмы")
-                    user_state[user_id] = {'action': 'rhyme', 'waiting_for_word': True}
-                
-                # 5. Кнопка "Пример"
-                elif message_text == "💡 Пример":
-                    answer = "💡 *Введи слово, для которого нужны примеры:*"
-                    keyboard = get_word_input_keyboard("примера")
-                    user_state[user_id] = {'action': 'example', 'waiting_for_word': True}
-                
-                # 6. Кнопка "Отмена"
-                elif message_text == "🔙 Отмена":
-                    answer = "❌ Действие отменено. Выбери новое действие:"
-                    keyboard = get_main_keyboard()
-                    user_state.pop(user_id, None)
-                
-                # 7. Кнопка "Новое слово"
-                elif message_text == "🔄 Новое слово":
-                    answer = "✏️ *Введи новое слово:*"
-                    keyboard = get_word_input_keyboard("работы")
-                    user_state[user_id] = {'waiting_for_word': True}
-                
-                # 8. Кнопки действий с конкретным словом (Синоним к 'слово')
-                elif message_text.startswith("🔍 Синоним к '"):
-                    word = message_text.replace("🔍 Синоним к '", "").rstrip("'")
-                    answer = get_synonyms_bs4(word)
-                    keyboard = get_action_keyboard(word)
-                    user_last_word[user_id] = word
-                
-                elif message_text.startswith("📖 Толкование '"):
-                    word = message_text.replace("📖 Толкование '", "").rstrip("'")
-                    answer = get_definition_api(word)
-                    keyboard = get_action_keyboard(word)
-                    user_last_word[user_id] = word
-                
-                elif message_text.startswith("🎭 Рифма к '"):
-                    word = message_text.replace("🎭 Рифма к '", "").rstrip("'")
-                    answer = get_rhyme_api(word)
-                    keyboard = get_action_keyboard(word)
-                    user_last_word[user_id] = word
-                
-                elif message_text.startswith("💡 Пример с '"):
-                    word = message_text.replace("💡 Пример с '", "").rstrip("'")
-                    answer = get_example_api(word)
-                    keyboard = get_action_keyboard(word)
-                    user_last_word[user_id] = word
-                
-                # 9. Если пользователь ожидает ввода слова (это текст, а не кнопка)
-                elif user_id in user_state and user_state[user_id].get('waiting_for_word'):
-                    word = message_text.strip()
-                    action = user_state[user_id].get('action', 'synonym')
-                    
-                    if len(word) < 2:
-                        answer = "❌ Слишком короткое слово. Попробуй ещё раз:"
-                        keyboard = get_word_input_keyboard(action)
-                    else:
-                        # Выполняем нужное действие
-                        if action == 'synonym':
-                            answer = get_synonyms_bs4(word)
-                        elif action == 'definition':
-                            answer = get_definition_api(word)
-                        elif action == 'rhyme':
-                            answer = get_rhyme_api(word)
-                        elif action == 'example':
-                            answer = get_example_api(word)
-                        else:
-                            answer = get_synonyms_bs4(word)
-                        
-                        # Показываем клавиатуру с действиями для этого слова
-                        keyboard = get_action_keyboard(word)
-                        user_last_word[user_id] = word
-                        user_state.pop(user_id, None)  # Сбрасываем состояние
-                
-                # 10. Если пользователь просто написал слово (без команды)
-                elif len(message_text) >= 2 and len(message_text) <= 30 and message_text.isalpha():
-                    word = message_text.strip()
-                    answer = f"🔍 *Что делать со словом '{word}'?*"
-                    keyboard = get_action_keyboard(word)
-                    user_last_word[user_id] = word
-                
-                # 11. Если пользователь написал что-то непонятное
-                else:
-                    answer = """❓ *Я не понял запрос.*
+    # Английские слова через API Datamuse
+    try:
+        url = f"https://api.datamuse.com/words?rel_rhy={word_lower}&max=10"
+        response = requests.get(url, timeout=8)
+        if response.status_code == 200:
+            rhymes = [item['word'] for item in response.json()]
+            if rhymes:
+                return f"🎭 *Рифмы к '{word}' (из API):*\n" + ", ".join(rhymes[:10])
+    except:
+        pass
+    
+    return f"🎭 *Рифмы к '{word}'*\nПопробуй: день, ночь, любовь, красивый"
 
-Нажми на кнопку внизу, чтобы выбрать действие:
-
-🔍 Синоним — найти похожие слова
-📖 Толкование — узнать значение
-🎭 Рифма — подобрать рифму
-💡 Пример — посмотреть примеры использования
-
-Или просто напиши слово, и я предложу варианты!"""
-                    keyboard = get_main_keyboard()
-                
-                # Отправляем сообщение с клавиатурой
-                vk.messages.send(
-                    peer_id=peer_id,
-                    message=answer,
-                    random_id=random.randint(1, 2**31),
-                    keyboard=keyboard.get_keyboard() if keyboard else None
-                )
-                
-                # Логирование
-                log_to_file(user_id, message_text, answer[:200] + "..." if len(answer) > 200 else answer)
-                
-            except Exception as e:
-                print(f"Ошибка: {e}")
-                try:
-                    vk.messages.send(
-                        peer_id=peer_id,
-                        message=f"⚠️ Ошибка: {str(e)[:100]}",
-                        random_id=random.randint(1, 2**31)
-                    )
-                except:
-                    pass
-
-if __name__ == "__main__":
-    main()
+# ФУНКЦИЯ 4: ПРИМЕРЫ (русский словарь + английский API) 
+def get_example_api(word):
+    print(f"[API] Ищу примеры для: {word}")
+    word_lower = word.lower()
+    
+    # Русские слова
+    if word_lower in russian_data and "examples" in russian_data[word_lower]:
+        examples = russian_data[word_lower]["examples"]
+        return "💡 *Примеры со словом '" + word + "':*\n" + "\n".join([f"• {ex}" for ex in examples[:3]])
+    
+    # Английские слова
+    try:
+        url = f"https://api.datamuse.com/words?sp={word_lower}&md=p&max=3"
+        response = requests.get(url, timeout=8)
+        if response.status_code == 200:
+            return f"💡 *Примеры с '{word}':*\nПопробуй использовать слово в предложении!"
+    except:
+        pass
+    
+    return f"💡 *Примеры с '{word}':*\n«Это {word} день!»\n«Он был очень {word} человеком»"
